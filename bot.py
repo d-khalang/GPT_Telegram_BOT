@@ -1,11 +1,15 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
-from dotenv import load_dotenv
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+import instaloader
+import re
 import asyncio
-import os
 from parser import fetch_chatgpt_conversation
+import os
+from dotenv import load_dotenv
 
+# Regex to extract shortcode from Instagram URL
+INSTAGRAM_REGEX = r"(?:https?://)?(?:www\.)?instagram\.com/(?:reel|tv|p)/([a-zA-Z0-9_-]+)"
 load_dotenv()
 
 TOKEN = os.getenv('TOKEN')
@@ -15,49 +19,72 @@ chat_progress = {}
 BATCH_SIZE = 10
 
 def split_message(text, max_length=4000):
-    # Split by paragraphs first for better readability
-    paragraphs = text.split('\n')
+    """Split long messages into chunks that fit Telegram's limit"""
+    if len(text) <= max_length:
+        return [text]
+    
     chunks = []
-    current_chunk = ""
-    for para in paragraphs:
-        if len(current_chunk) + len(para) + 1 > max_length:
-            chunks.append(current_chunk)
-            current_chunk = para
-        else:
-            if current_chunk:
-                current_chunk += '\n' + para
-            else:
-                current_chunk = para
-    if current_chunk:
-        chunks.append(current_chunk)
+    while text:
+        if len(text) <= max_length:
+            chunks.append(text)
+            break
+        # Find the last space within the limit
+        split_point = text.rfind(' ', 0, max_length)
+        if split_point == -1:
+            split_point = max_length
+        chunks.append(text[:split_point])
+        text = text[split_point:].lstrip()
+    
     return chunks
 
+# Initialize Instaloader
+L = instaloader.Instaloader(download_videos=True, download_video_thumbnails=False,
+                            download_comments=False, save_metadata=False, post_metadata_txt_pattern="")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hi! Send me a ChatGPT link and I'll summarize it here.")
+    welcome_text = """Welcome! I'm a multi-functional bot with two main features:
 
-async def handle_chatgpt_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
-    chat_id = update.effective_chat.id
+📹 **Video Downloader**: Use `/video <Instagram link>` to fetch and send Instagram videos/reels
 
-    if "chat.openai.com" not in url and "chatgpt.com" not in url:
-        await update.message.reply_text("Please send a valid ChatGPT conversation link.")
+💬 **ChatGPT Share**: Use `/share <ChatGPT link>` to share ChatGPT conversations
+
+Try either command to get started!"""
+    await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
+
+async def send_instagram_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /video <Instagram URL>")
         return
 
-    await update.message.reply_text("Fetching and parsing the ChatGPT conversation...")
+    text = " ".join(context.args)
+    match = re.search(INSTAGRAM_REGEX, text)
+
+    if not match:
+        await update.message.reply_text("Please provide a valid Instagram video/reel/post link.")
+        return
+
+    shortcode = match.group(1)
 
     try:
-        messages = await fetch_chatgpt_conversation(url)
+        await update.message.reply_text("Processing...Just a moment.")
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
+
+        if post.typename == 'GraphSidecar':
+            count = 0
+            for node in post.get_sidecar_nodes():
+                if node.is_video:
+                    await update.message.reply_video(video=node.video_url)
+                    count += 1
+            if count == 0:
+                await update.message.reply_text("No videos found in this carousel post.")
+        elif post.is_video:
+            await update.message.reply_video(video=post.video_url)
+        else:
+            await update.message.reply_text("This post does not contain a video.")
+
     except Exception as e:
-        await update.message.reply_text(f"Failed to fetch conversation: {e}")
-        return
-
-    if not messages:
-        await update.message.reply_text("No messages found in the conversation.")
-        return
-
-    chat_progress[chat_id] = {'messages': messages, 'pos': 0}
-    await update.message.reply_text("📩 *ChatGPT Conversation Shared:*", parse_mode=ParseMode.MARKDOWN)
-    await send_next_batch(update, context, chat_id)
+        print("Error:", e)
+        await update.message.reply_text("Failed to fetch the video. Maybe the post is private or invalid.")
 
 async def send_next_batch(update, context, chat_id):
     data = chat_progress.get(chat_id)
@@ -91,17 +118,39 @@ async def load_more_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def share_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Please provide a ChatGPT share link.")
+        await update.message.reply_text("Please provide a ChatGPT share link.\nUsage: /share <ChatGPT URL>")
         return
     url = context.args[0]
-    
+    chat_id = update.effective_chat.id
 
+    if "chat.openai.com" not in url and "chatgpt.com" not in url:
+        await update.message.reply_text("Please send a valid ChatGPT conversation link.")
+        return
 
-app = ApplicationBuilder().token(TOKEN).build()
+    await update.message.reply_text("Fetching and parsing the ChatGPT conversation...")
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_chatgpt_link))
-app.add_handler(CallbackQueryHandler(load_more_callback, pattern="^load_more$"))
-app.add_handler(CommandHandler("share", share_command))
+    try:
+        messages = await fetch_chatgpt_conversation(url)
+    except Exception as e:
+        await update.message.reply_text(f"Failed to fetch conversation: {e}")
+        return
 
-app.run_polling()
+    if not messages:
+        await update.message.reply_text("No messages found in the conversation.")
+        return
+
+    chat_progress[chat_id] = {'messages': messages, 'pos': 0}
+    await update.message.reply_text("📩 *ChatGPT Conversation Shared:*", parse_mode=ParseMode.MARKDOWN)
+    await send_next_batch(update, context, chat_id)
+
+if __name__ == '__main__':
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("video", send_instagram_video))
+    app.add_handler(CommandHandler("share", share_command))
+    app.add_handler(CallbackQueryHandler(load_more_callback, pattern="^load_more$"))
+
+    print("Bot is running...")
+    app.run_polling()
+
