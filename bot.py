@@ -72,6 +72,7 @@ async def send_next_batch(update, context, chat_id):
         for chunk in split_message(msg['text']):
             await context.bot.send_message(chat_id=chat_id, text=f"{role}\n{chunk}", parse_mode=ParseMode.MARKDOWN)
             role = ""  # Only show the role label on the first chunk
+            await asyncio.sleep(0.7)  # Add a delay between messages
     data['pos'] = end
     # If there are more messages, show the load more button
     if end < len(messages):
