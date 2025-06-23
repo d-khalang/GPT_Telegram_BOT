@@ -1,0 +1,5 @@
+[build]
+postBuildCommand = "playwright install chromium"
+
+[start]
+cmd = "python bot.py"
