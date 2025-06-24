@@ -66,10 +66,10 @@ async def send_instagram_video(update: Update, context: ContextTypes.DEFAULT_TYP
     shortcode = match.group(1)
 
     try:
-        await update.message.reply_text("Processing...Just a moment.")
         post = instaloader.Post.from_shortcode(L.context, shortcode)
 
         if post.typename == 'GraphSidecar':
+            await update.message.reply_text("Processing...Just a moment.")
             count = 0
             for node in post.get_sidecar_nodes():
                 if node.is_video:
@@ -78,6 +78,7 @@ async def send_instagram_video(update: Update, context: ContextTypes.DEFAULT_TYP
             if count == 0:
                 await update.message.reply_text("No videos found in this carousel post.")
         elif post.is_video:
+            await update.message.reply_text("Processing...Just a moment.")
             await update.message.reply_video(video=post.video_url)
         else:
             await update.message.reply_text("This post does not contain a video.")
